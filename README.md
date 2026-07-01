@@ -3,8 +3,8 @@
 A focused, single-purpose Streamlit tool: decide whether the line of sight
 between a Zebra reader antenna and a tag is **CLEAR** or **OBSTRUCTED** — and,
 crucially, tell a **blocked path** apart from a tag that has simply **moved
-away**. It runs against a live reader over **LLRP** or a physics-based
-**simulator**.
+away**. It ingests reads from a live reader over **MQTT** (Zebra IoT Connector)
+or **LLRP**, or from a physics-based **simulator**.
 
 ## Quick start
 
@@ -58,15 +58,39 @@ label on top.
 
 ## Using a live Zebra reader
 
+Two transports are supported; pick one in the sidebar under **Live reader**.
+
+### MQTT — Zebra IoT Connector (recommended)
+
+```bash
+pip install paho-mqtt
+```
+
+This is Zebra's recommended path: the reader's built-in **IoT Connector**
+publishes tag JSON to an MQTT broker and the app subscribes — no LLRP state
+machine to manage.
+
+1. On the reader (FX7500 / FX9600 / FXR90 / ATR7000), enable **IoT Connector**
+   and point its **Tag-Data** interface at your MQTT broker, using a topic like
+   `zebra/<reader-name>/data`.
+2. In the sidebar choose **MQTT (IoT Connector)**, enter the **broker host**
+   (port 1883, or 8883 with TLS), the **topic** (`zebra/+/data` matches any
+   reader), optional auth, and each antenna's floor position, then **Connect**.
+
+The parser is tolerant of IoT Connector message variants — managed
+`SimpleTagEvent` or raw, single or batched, wrapped in a `data` object or flat —
+and normalises `idHex`/`peakRssi`/`antenna`/`phase`/`timestamp` into reads.
+
+### LLRP (direct)
+
 ```bash
 pip install sllurp
 ```
 
-In the sidebar choose **Live reader (LLRP)**, enter the reader IP (LLRP port
-5084) and each antenna's floor position, then **Connect**. Reads stream over
-LLRP via `sllurp`. Note Zebra FX readers report RSSI (used here); the simulator
-additionally supplies Doppler/phase so the moving/static label is demonstrable
-without an Impinj/ATR7000 reader.
+Choose **LLRP**, enter the reader IP (port 5084) and antenna positions. Note
+Zebra FX readers report RSSI (used here); the simulator additionally supplies
+Doppler/phase so the moving/static label is demonstrable without an Impinj /
+ATR7000 reader.
 
 ## Architecture
 
@@ -76,7 +100,7 @@ app_common.py          # session state, data-source lifecycle, live-refresh loop
 rfid/
   obstruction.py       # motion-invariant analyzer + fixed-zone baseline + ML classifier
   ranging.py           # RSSI<->distance + 2D localization (used to place the tag)
-  sources.py           # TagSource: live LLRP (sllurp) or simulator, one interface
+  sources.py           # TagSource: MQTT (IoT Connector), LLRP (sllurp), or simulator
   simulator.py         # physics-based reads (RSSI, phase, Doppler, obstructions)
   models.py            # TagRead, AntennaConfig
 tests/

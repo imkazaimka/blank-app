@@ -1,13 +1,15 @@
 """A single streaming interface over real and simulated tag data.
 
-The four tools never talk to a reader directly; they consume a
-:class:`TagSource`.  Two implementations are provided:
+The tool never talks to a reader directly; it consumes a :class:`TagSource`.
+Three implementations are provided:
 
 * :class:`SimulatedTagSource` - drives a :class:`~rfid.simulator.Scene` on a
   background thread (always available).
+* :class:`MQTTTagSource` - subscribes to a Zebra **IoT Connector** tag-data
+  topic on an MQTT broker and parses the JSON tag events (the recommended
+  production path: the reader publishes, we subscribe - no LLRP state machine).
 * :class:`LLRPTagSource` - wraps ``sllurp`` to stream real reads from a Zebra
-  FX/FXR reader over LLRP (used when the ``sllurp`` package is installed and a
-  reader is reachable).
+  FX/FXR reader over LLRP.
 
 Both expose the same tiny contract::
 
@@ -21,12 +23,14 @@ underlying transport.
 
 from __future__ import annotations
 
+import json
+import math
 import threading
 import time
 from collections import deque
-from typing import Deque, List, Optional, Sequence
+from typing import Any, Deque, List, Optional, Sequence
 
-from .models import PORT_LLRP, TagRead
+from .models import PORT_LLRP, PORT_MQTT, TagRead
 from .simulator import Scene
 
 
@@ -260,3 +264,205 @@ class LLRPTagSource(TagSource):
             except Exception:
                 pass
         self._reader = None
+
+
+class MQTTTagSource(TagSource):
+    """Streams reads from a Zebra reader via the **IoT Connector** over MQTT.
+
+    A Zebra FX7500 / FX9600 / FXR90 / ATR7000 with IoT Connector configured to
+    publish its *tag-data* interface to an MQTT broker sends JSON tag events on a
+    topic like ``zebra/<reader-name>/data``.  We subscribe with ``paho-mqtt`` and
+    normalise each event into :class:`~rfid.models.TagRead`.
+
+    The reader's own message shape varies with firmware / configuration (managed
+    ``SimpleTagEvent`` vs. raw, single object vs. batched array, wrapped in a
+    ``data`` object or flat), so :meth:`_parse_payload` is deliberately tolerant
+    of field-name and structure variants.  If ``paho-mqtt`` is missing or the
+    broker is unreachable, :meth:`start` records the reason in ``last_error``.
+    """
+
+    # Accepted spellings for each field across firmware / config variants.
+    _EPC_KEYS = ("idHex", "epc", "EPC", "epcHex", "id", "tagId")
+    _RSSI_KEYS = ("peakRssi", "peak_rssi", "rssi", "PeakRSSI", "RSSI")
+    _ANT_KEYS = ("antenna", "antennaPort", "antennaId", "antennaID", "AntennaID", "port")
+    _TS_KEYS = ("timestamp", "reportTime", "lastSeenTime", "firstSeenTime", "time")
+    _PHASE_KEYS = ("phase", "phaseAngle", "rfPhase", "RFPhaseAngle")
+    _CH_KEYS = ("channel", "channelIndex", "ChannelIndex")
+    _COUNT_KEYS = ("seenCount", "tagSeenCount", "numberOfReads", "count", "reads")
+    _DOP_KEYS = ("doppler", "dopplerFrequency", "rfDoppler", "RFDopplerFrequency")
+
+    def __init__(
+        self,
+        broker: str,
+        port: int = PORT_MQTT,
+        topic: str = "zebra/+/data",
+        username: str = "",
+        password: str = "",
+        tls: bool = False,
+        maxlen: int = 5000,
+    ) -> None:
+        super().__init__(maxlen)
+        self.broker = broker
+        self.port = port
+        self.topic = topic
+        self.username = username
+        self.password = password
+        self.tls = tls
+        self._client = None
+
+    @property
+    def is_live(self) -> bool:
+        return True
+
+    # -- parsing ---------------------------------------------------------- #
+    @staticmethod
+    def _first(d: dict, keys, default=None):
+        for k in keys:
+            if k in d and d[k] is not None:
+                return d[k]
+        return default
+
+    @classmethod
+    def _coerce_timestamp(cls, val: Any) -> float:
+        """IoT Connector timestamps may be epoch ms, epoch s, or ISO-8601."""
+        if val is None:
+            return time.time()
+        if isinstance(val, (int, float)):
+            v = float(val)
+            if v > 1e14:      # microseconds
+                return v / 1e6
+            if v > 1e11:      # milliseconds
+                return v / 1e3
+            return v          # seconds
+        if isinstance(val, str):
+            s = val.strip().replace("Z", "+00:00")
+            try:
+                from datetime import datetime
+
+                return datetime.fromisoformat(s).timestamp()
+            except Exception:
+                try:
+                    return float(val)
+                except Exception:
+                    return time.time()
+        return time.time()
+
+    @classmethod
+    def _event_to_read(cls, ev: dict, reader: str) -> Optional[TagRead]:
+        # Tag fields live at the top level or inside a "data" object.
+        body = ev.get("data") if isinstance(ev.get("data"), dict) else ev
+        epc = cls._first(body, cls._EPC_KEYS)
+        rssi = cls._first(body, cls._RSSI_KEYS)
+        if epc is None or rssi is None:
+            return None  # not a tag-read message (e.g. heartbeat/management)
+        if isinstance(epc, (bytes, bytearray)):
+            epc = epc.hex().upper()
+
+        phase = cls._first(body, cls._PHASE_KEYS)
+        if phase is not None:
+            phase = float(phase)
+            # IoT Connector reports phase in degrees; normalise to radians.
+            if abs(phase) > 6.5:
+                phase = math.radians(phase % 360.0)
+
+        ts = cls._coerce_timestamp(
+            cls._first(body, cls._TS_KEYS, default=cls._first(ev, cls._TS_KEYS))
+        )
+        reader_name = ev.get("hostName") or ev.get("reader") or reader
+        return TagRead(
+            epc=str(epc).upper(),
+            rssi=float(rssi),
+            antenna=int(cls._first(body, cls._ANT_KEYS, default=1)),
+            phase=phase,
+            channel=cls._first(body, cls._CH_KEYS),
+            timestamp=ts,
+            seen_count=int(cls._first(body, cls._COUNT_KEYS, default=1)),
+            doppler=cls._first(body, cls._DOP_KEYS),
+            reader=str(reader_name),
+        )
+
+    @classmethod
+    def _parse_payload(cls, payload, reader: str = "MQTT") -> List[TagRead]:
+        """Parse one MQTT message body into zero or more :class:`TagRead`."""
+        if isinstance(payload, (bytes, bytearray)):
+            payload = payload.decode("utf-8", "ignore")
+        try:
+            obj = json.loads(payload)
+        except (ValueError, TypeError):
+            return []
+        # A message may be a single event, a list of events, or an envelope
+        # whose "data" holds a list of events.
+        events: List[dict]
+        if isinstance(obj, list):
+            events = [e for e in obj if isinstance(e, dict)]
+        elif isinstance(obj, dict):
+            data = obj.get("data")
+            if isinstance(data, list):
+                events = [e if isinstance(e, dict) else {} for e in data]
+            else:
+                events = [obj]
+        else:
+            return []
+        out: List[TagRead] = []
+        for ev in events:
+            r = cls._event_to_read(ev, reader)
+            if r is not None:
+                out.append(r)
+        return out
+
+    # -- lifecycle -------------------------------------------------------- #
+    def start(self) -> None:
+        if self._running:
+            return
+        try:
+            import paho.mqtt.client as mqtt  # type: ignore
+        except Exception as exc:  # pragma: no cover - optional dep
+            self.last_error = f"paho-mqtt not installed: {exc}"
+            return
+
+        try:
+            # paho-mqtt v2 requires an explicit callback API version; v1 doesn't.
+            try:
+                client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)  # type: ignore[attr-defined]
+            except (AttributeError, TypeError):
+                client = mqtt.Client()
+            if self.username:
+                client.username_pw_set(self.username, self.password or None)
+            if self.tls:
+                client.tls_set()
+            client.on_connect = self._on_connect
+            client.on_message = self._on_message
+            client.connect(self.broker, self.port, keepalive=30)
+            client.loop_start()  # paho runs its own background thread
+        except Exception as exc:  # pragma: no cover - broker path
+            self.last_error = f"MQTT connect failed: {exc}"
+            self._client = None
+            return
+        self._client = client
+        self._running = True
+
+    def _on_connect(self, client, userdata, flags, rc, *args) -> None:  # pragma: no cover
+        if rc == 0:
+            client.subscribe(self.topic, qos=1)
+        else:
+            self.last_error = f"MQTT connect refused (rc={rc})"
+
+    def _on_message(self, client, userdata, msg) -> None:  # pragma: no cover
+        reader = ""
+        try:
+            parts = msg.topic.split("/")
+            reader = parts[1] if len(parts) > 1 else msg.topic
+        except Exception:
+            pass
+        self._push(self._parse_payload(msg.payload, reader or "MQTT"))
+
+    def stop(self) -> None:
+        self._running = False
+        c = self._client
+        if c is not None:  # pragma: no cover - broker path
+            try:
+                c.loop_stop()
+                c.disconnect()
+            except Exception:
+                pass
+        self._client = None

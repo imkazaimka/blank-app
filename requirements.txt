@@ -5,10 +5,12 @@ pandas>=2.0
 plotly>=5.18
 scipy>=1.10
 
-# --- Optional: live Zebra reader over LLRP ---
-# The app runs fully in Simulator mode without this; install it to stream real
-# reads from an FX7500 / FX9600 / FXR90 reader.  Imported lazily.
+# --- Optional: live Zebra reader ---
+# The app runs fully in Simulator mode without these; install to stream real
+# reads.  Both are imported lazily.
 #
-#   sllurp>=1.2.1
+#   paho-mqtt>=1.6     # MQTT — subscribe to a reader's IoT Connector tag data
+#   sllurp>=1.2.1      # LLRP — direct connection to an FX7500 / FX9600 / FXR90
 #
-# Install with:  pip install sllurp
+# Install with:  pip install paho-mqtt        (recommended, via IoT Connector)
+#            or:  pip install sllurp           (direct LLRP)

@@ -13,7 +13,7 @@ import streamlit as st
 
 from rfid.models import AntennaConfig, TagRead
 from rfid.simulator import Scene, room_scene
-from rfid.sources import LLRPTagSource, SimulatedTagSource, TagSource
+from rfid.sources import LLRPTagSource, MQTTTagSource, SimulatedTagSource, TagSource
 
 BRAND = "#00B5E2"
 
@@ -21,6 +21,14 @@ BRAND = "#00B5E2"
 def sllurp_available() -> bool:
     try:
         __import__("sllurp")
+        return True
+    except Exception:
+        return False
+
+
+def paho_available() -> bool:
+    try:
+        __import__("paho.mqtt.client")
         return True
     except Exception:
         return False
@@ -76,6 +84,18 @@ def start_live(ip: str, port: int = 5084, tx_power: Optional[int] = None) -> Tag
     ss = _ss()
     stop_source()
     src = LLRPTagSource(ip, port=port, tx_power=tx_power)
+    src.start()
+    ss.source, ss.source_kind = src, "live"
+    return src
+
+
+def start_mqtt(broker: str, port: int = 1883, topic: str = "zebra/+/data",
+               username: str = "", password: str = "", tls: bool = False) -> TagSource:
+    """Connect to a Zebra IoT Connector tag-data topic on an MQTT broker."""
+    ss = _ss()
+    stop_source()
+    src = MQTTTagSource(broker, port=port, topic=topic, username=username,
+                        password=password, tls=tls)
     src.start()
     ss.source, ss.source_kind = src, "live"
     return src
