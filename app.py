@@ -24,9 +24,9 @@ import streamlit as st
 st.set_page_config(page_title="RFID Obstruction Detector", page_icon="🚧", layout="wide")
 
 from app_common import (
-    BRAND, _ss, antennas, get_scene, live_rerun, page_header, paho_available, pump,
-    recent_reads, set_scene, sllurp_available, source_running, start_live, start_mqtt,
-    start_sim, stop_source,
+    BRAND, _ss, antennas, detected_antenna_ids, get_scene, live_rerun, page_header,
+    paho_available, pump, recent_reads, set_scene, sllurp_available, source_running,
+    start_live, start_mqtt, start_sim, stop_source,
 )
 from rfid.models import AntennaConfig
 from rfid.obstruction import DOPPLER_MOVING_HZ, RESID_DROP_DB, analyze
@@ -35,6 +35,9 @@ from rfid.simulator import Obstruction, room_scene
 _ss()
 page_header("🚧", "RFID Obstruction Detector",
             "Is the reader→tag path blocked, or did the tag just move? This tells them apart.")
+
+# Drain the source early so the sidebar can auto-detect antennas from live reads.
+pump()
 
 # --------------------------------------------------------------------------- #
 # Sidebar — source + detection settings
@@ -111,17 +114,6 @@ with st.sidebar:
             if not sllurp_available():
                 st.warning("`sllurp` not installed — run `pip install sllurp` for LLRP.")
 
-        n_ant = st.number_input("Number of antennas", 3, 8, 4, 1,
-                                help="Motion-aware detection needs ≥3 antennas with known positions.")
-        st.caption("Antenna positions (metres):")
-        live_ants = {}
-        for i in range(1, int(n_ant) + 1):
-            cc = st.columns(2)
-            x = cc[0].number_input(f"A{i} x", value=float(0 if i in (1, 4) else 6), key=f"ax{i}")
-            y = cc[1].number_input(f"A{i} y", value=float(0 if i in (1, 2) else 5), key=f"ay{i}")
-            live_ants[i] = AntennaConfig(antenna_id=i, x=x, y=y)
-        _ss().live_antennas = live_ants
-
         c1, c2 = st.columns(2)
         if c1.button("▶ Connect", use_container_width=True):
             if transport.startswith("MQTT"):
@@ -132,6 +124,30 @@ with st.sidebar:
                 st.error(src.last_error)
         if c2.button("⏹ Stop", use_container_width=True):
             stop_source()
+
+        # Antenna COUNT is auto-detected from the read stream — never guessed.
+        # Only the physical positions (which the reader can't know) are asked for.
+        detected = detected_antenna_ids()
+        if detected:
+            st.success(f"Auto-detected **{len(detected)}** antenna(s): "
+                       + ", ".join(f"Ant {a}" for a in detected))
+            st.caption("Set each detected antenna's floor position (m):")
+            # Non-degenerate starting geometry the installer overrides.
+            defaults = [(0, 0), (6, 0), (6, 5), (0, 5), (3, 0), (3, 5), (0, 2.5), (6, 2.5)]
+            live_ants = {}
+            for idx, aid in enumerate(detected):
+                dx, dy = defaults[idx % len(defaults)]
+                cc = st.columns(2)
+                x = cc[0].number_input(f"Ant {aid} x", value=float(dx), key=f"posx_{aid}")
+                y = cc[1].number_input(f"Ant {aid} y", value=float(dy), key=f"posy_{aid}")
+                live_ants[aid] = AntennaConfig(antenna_id=aid, x=x, y=y)
+            _ss().live_antennas = live_ants
+        elif source_running():
+            st.info("Connected — waiting for reads to detect antennas. Present a tag so "
+                    "every antenna reports at least once.")
+        else:
+            st.info("Press **Connect**. The number of antennas is detected automatically "
+                    "from the reader's tag stream.")
 
     st.divider()
     st.markdown("### Detection")
@@ -145,8 +161,8 @@ with st.sidebar:
 # Auto-start the simulator so there's always something to show.
 if _ss().source is None and mode == "Simulator":
     start_sim()
+    pump()
 
-pump()
 ants = antennas()
 reads = recent_reads(window_s)
 reports = analyze(reads, ants, resid_drop_db=resid_drop, doppler_moving_hz=dop_thr)
