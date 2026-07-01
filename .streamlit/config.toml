@@ -1,0 +1,13 @@
+[theme]
+base = "dark"
+primaryColor = "#00B5E2"        # Zebra cyan accent
+backgroundColor = "#0E1117"
+secondaryBackgroundColor = "#1A1D24"
+textColor = "#E8EAED"
+font = "sans serif"
+
+[server]
+runOnSave = true
+
+[browser]
+gatherUsageStats = false
