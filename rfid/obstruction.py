@@ -27,7 +27,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .models import TagRead
+from .models import AntennaConfig, TagRead
+from .ranging import expected_rssi, localize, rssi_to_distance
 
 try:
     from scipy.stats import kurtosis as _kurtosis
@@ -299,6 +300,190 @@ def detect(
             v.reasons.append(f"ML classifier p(obstructed)={p:.2f}")
         verdicts.append(v)
     return verdicts
+
+
+# --------------------------------------------------------------------------- #
+# Motion-invariant detection (position residuals + Doppler)
+# --------------------------------------------------------------------------- #
+# The fixed-baseline detector above assumes the tag stays put: a tag that simply
+# moves away also drops RSSI and would look "obstructed".  The detector below
+# removes that confound.  Each window it RE-ESTIMATES the tag's position from the
+# antennas that agree, predicts what RSSI each antenna *should* see at that
+# position (from the path-loss model), and flags an antenna only when its
+# measured RSSI is far BELOW that prediction.  Tag motion is absorbed into the
+# position estimate (all residuals stay ~0), so only an *unexplained* per-path
+# drop counts as an obstruction.  Requires >= 3 antennas with known positions.
+
+# Mean |Doppler| (Hz) above this means the tag is moving (~1 m/s at 915 MHz is
+# ~6 Hz; a static tag sits near the reader's Doppler noise floor).
+DOPPLER_MOVING_HZ = 3.0
+# An antenna reading this many dB below its predicted RSSI is a blocked path.
+RESID_DROP_DB = 6.0
+
+
+@dataclass
+class PathObservation:
+    """Windowed stats for one (tag, antenna) path."""
+
+    antenna: int
+    mean_rssi: float
+    rssi_std: float
+    doppler_mean: Optional[float]
+    n_reads: int
+
+
+@dataclass
+class PathVerdict:
+    """Per-antenna obstruction decision for a tag at its estimated position."""
+
+    antenna: int
+    obstructed: bool
+    measured_rssi: float
+    predicted_rssi: float
+    residual: float          # measured - predicted (<= 0 means weaker than expected)
+    rssi_std: float
+
+
+@dataclass
+class TagReport:
+    """Motion-aware obstruction report for one tag across all antennas."""
+
+    epc: str
+    position: Optional[Tuple[float, float]]
+    position_uncertainty: float
+    moving: bool
+    paths: List[PathVerdict]
+    reasons: List[str]
+
+    @property
+    def blocked_antennas(self) -> List[int]:
+        return [p.antenna for p in self.paths if p.obstructed]
+
+    @property
+    def obstructed(self) -> bool:
+        return len(self.blocked_antennas) > 0
+
+    @property
+    def status(self) -> str:
+        return "OBSTRUCTED" if self.obstructed else "CLEAR"
+
+
+def _window_observations(epc_reads: Sequence[TagRead]) -> Dict[int, PathObservation]:
+    """Collapse a tag's reads into one robust observation per antenna."""
+    by_ant: Dict[int, List[TagRead]] = {}
+    for r in epc_reads:
+        by_ant.setdefault(r.antenna, []).append(r)
+    obs: Dict[int, PathObservation] = {}
+    for ant, rs in by_ant.items():
+        rssis = np.array([r.rssi for r in rs], dtype=float)
+        # Median is robust to the impulsive dropouts UHF RSSI is prone to.
+        mean_rssi = float(np.median(rssis))
+        dopplers = [r.doppler for r in rs if r.doppler is not None]
+        obs[ant] = PathObservation(
+            antenna=ant,
+            mean_rssi=mean_rssi,
+            rssi_std=float(np.std(rssis)),
+            doppler_mean=float(np.mean(dopplers)) if dopplers else None,
+            n_reads=len(rs),
+        )
+    return obs
+
+
+def _robust_position(
+    obs: Dict[int, PathObservation],
+    antennas: Dict[int, AntennaConfig],
+    resid_drop_db: float,
+    max_iter: int = 4,
+):
+    """Localize the tag using only the antennas that mutually agree.
+
+    Iteratively drops the antenna whose measured RSSI is furthest *below* what
+    its distance implies (a blocked path reads too weak -> its range is too
+    long -> it is the outlier), refitting until the kept antennas are
+    consistent or only two remain.
+    """
+    active = set(obs.keys())
+    ranges = {a: rssi_to_distance(obs[a].mean_rssi, antennas[a]) for a in active}
+    fix = localize({a: ranges[a] for a in active}, antennas)
+    for _ in range(max_iter):
+        if fix is None or len(active) <= 2:
+            break
+        residuals = {}
+        for a in active:
+            d = math.hypot(fix.x - antennas[a].x, fix.y - antennas[a].y)
+            residuals[a] = obs[a].mean_rssi - expected_rssi(d, antennas[a])
+        worst = min(active, key=lambda a: residuals[a])
+        if residuals[worst] > -resid_drop_db:
+            break  # everyone consistent
+        active.discard(worst)
+        fix = localize({a: ranges[a] for a in active}, antennas)
+    return fix
+
+
+def analyze(
+    reads: Sequence[TagRead],
+    antennas: Dict[int, AntennaConfig],
+    resid_drop_db: float = RESID_DROP_DB,
+    min_antennas: int = 3,
+    doppler_moving_hz: float = DOPPLER_MOVING_HZ,
+) -> List[TagReport]:
+    """Motion-invariant obstruction detection over a window of reads.
+
+    For each tag seen by ``>= min_antennas`` antennas (with known positions),
+    estimate its position from the consistent antennas and flag any antenna
+    whose RSSI sits ``resid_drop_db`` below the path-loss prediction at that
+    position.  Because the position is re-estimated every call, a tag that
+    simply moved keeps all residuals near zero and is reported CLEAR.
+    """
+    groups = group_reads_by_epc(reads)
+    reports: List[TagReport] = []
+    for epc, epc_reads in sorted(groups.items()):
+        obs = _window_observations(epc_reads)
+        present = [a for a in obs if a in antennas]
+        if len(present) < min_antennas:
+            continue  # cannot separate motion from blockage; see analyze_or_baseline
+        fix = _robust_position({a: obs[a] for a in present}, antennas, resid_drop_db)
+        # Motion from Doppler magnitude: use mean |Doppler| so a tag changing
+        # direction within the window doesn't average itself back to zero.
+        dopplers = [abs(r.doppler) for r in epc_reads if r.doppler is not None]
+        moving = bool(dopplers) and float(np.mean(dopplers)) > doppler_moving_hz
+        paths: List[PathVerdict] = []
+        reasons: List[str] = []
+        if fix is None:
+            continue
+        for a in sorted(present):
+            d = math.hypot(fix.x - antennas[a].x, fix.y - antennas[a].y)
+            predicted = expected_rssi(d, antennas[a])
+            resid = obs[a].mean_rssi - predicted
+            blocked = resid <= -resid_drop_db
+            paths.append(PathVerdict(a, blocked, obs[a].mean_rssi, predicted, resid, obs[a].rssi_std))
+            if blocked:
+                reasons.append(
+                    f"Ant {a}: {obs[a].mean_rssi:.1f} dBm is {abs(resid):.1f} dB below the "
+                    f"{predicted:.1f} dBm expected at the tag's position — path blocked"
+                )
+        if not reasons:
+            move_txt = "moving" if moving else "static"
+            reasons.append(
+                f"all antennas match the tag's estimated position ({move_txt}); "
+                f"any RSSI change is explained by geometry — clear line of sight"
+            )
+        reports.append(TagReport(
+            epc=epc,
+            position=(fix.x, fix.y),
+            position_uncertainty=fix.radius_m,
+            moving=moving,
+            paths=paths,
+            reasons=reasons,
+        ))
+    return reports
+
+
+def group_reads_by_epc(reads: Sequence[TagRead]) -> Dict[str, List[TagRead]]:
+    out: Dict[str, List[TagRead]] = {}
+    for r in reads:
+        out.setdefault(r.epc, []).append(r)
+    return out
 
 
 # --------------------------------------------------------------------------- #

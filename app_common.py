@@ -1,91 +1,83 @@
-"""Shared Streamlit helpers for the Zebra RFID tool suite.
+"""Shared Streamlit helpers for the Obstruction Detector app.
 
-Keeps the per-page code small: session-state wiring, the source-selection
-sidebar (simulator vs. live LLRP reader), a live-refresh loop and a few
-formatting helpers.  Importable by ``app.py`` and every file in ``pages/``.
+Session-state wiring, the data-source lifecycle (simulator or a live LLRP
+reader), a rolling read buffer and a live-refresh loop.
 """
 
 from __future__ import annotations
 
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence
 
 import streamlit as st
 
-from rfid.models import Device, TagRead
-from rfid.simulator import Scene, demo_scene
+from rfid.models import AntennaConfig, TagRead
+from rfid.simulator import Scene, room_scene
 from rfid.sources import LLRPTagSource, SimulatedTagSource, TagSource
 
 BRAND = "#00B5E2"
 
 
-# --------------------------------------------------------------------------- #
-# Optional-dependency probe (shown on the home page / sidebars)
-# --------------------------------------------------------------------------- #
-def optional_capabilities() -> Dict[str, bool]:
-    caps = {}
-    for mod, label in [
-        ("sllurp", "Live LLRP reads (sllurp)"),
-        ("zeroconf", "mDNS discovery (zeroconf)"),
-        ("wsdiscovery", "WS-Discovery (WSDiscovery)"),
-        ("pysnmp", "SNMP enrich (pysnmp)"),
-    ]:
-        try:
-            __import__(mod)
-            caps[label] = True
-        except Exception:
-            caps[label] = False
-    return caps
+def sllurp_available() -> bool:
+    try:
+        __import__("sllurp")
+        return True
+    except Exception:
+        return False
 
 
 # --------------------------------------------------------------------------- #
 # Session state
 # --------------------------------------------------------------------------- #
-def _ss() -> "st.session_state":
+def _ss():
     ss = st.session_state
-    ss.setdefault("source", None)          # active TagSource
+    ss.setdefault("source", None)
     ss.setdefault("source_kind", None)     # "sim" | "live"
-    ss.setdefault("scene", None)           # active Scene (sim mode)
-    ss.setdefault("devices", [])           # discovered devices
-    ss.setdefault("selected_device", None)
-    ss.setdefault("history", {})           # epc -> list[TagRead] rolling buffer
+    ss.setdefault("scene", None)
+    ss.setdefault("history", {})           # epc -> list[TagRead]
+    ss.setdefault("live_antennas", {})     # antenna_id -> AntennaConfig (live mode)
     return ss
 
 
 def get_scene() -> Scene:
     ss = _ss()
     if ss.scene is None:
-        ss.scene = demo_scene()
+        ss.scene = room_scene()
     return ss.scene
 
 
 def set_scene(scene: Scene) -> None:
-    ss = _ss()
     stop_source()
-    ss.scene = scene
+    _ss().scene = scene
+    clear_history()
 
 
-def get_source() -> Optional[TagSource]:
-    return _ss().source
+def antennas() -> Dict[int, AntennaConfig]:
+    """Antenna geometry currently in use (scene in sim mode, editor in live)."""
+    ss = _ss()
+    if ss.source_kind == "live" and ss.live_antennas:
+        return ss.live_antennas
+    return get_scene().antennas
 
 
-def start_sim_source(rate_hz: float = 6.0) -> TagSource:
+# --------------------------------------------------------------------------- #
+# Source lifecycle
+# --------------------------------------------------------------------------- #
+def start_sim(rate_hz: float = 6.0) -> TagSource:
     ss = _ss()
     stop_source()
     src = SimulatedTagSource(get_scene(), rate_hz=rate_hz)
     src.start()
-    ss.source = src
-    ss.source_kind = "sim"
+    ss.source, ss.source_kind = src, "sim"
     return src
 
 
-def start_live_source(device: Device, tx_power_dbm: Optional[int] = None) -> TagSource:
+def start_live(ip: str, port: int = 5084, tx_power: Optional[int] = None) -> TagSource:
     ss = _ss()
     stop_source()
-    src = LLRPTagSource(device.ip, port=device.port or 5084, tx_power=tx_power_dbm)
+    src = LLRPTagSource(ip, port=port, tx_power=tx_power)
     src.start()
-    ss.source = src
-    ss.source_kind = "live"
+    ss.source, ss.source_kind = src, "live"
     return src
 
 
@@ -96,23 +88,22 @@ def stop_source() -> None:
             ss.source.stop()
         except Exception:
             pass
-    ss.source = None
-    ss.source_kind = None
+    ss.source, ss.source_kind = None, None
 
 
-# --------------------------------------------------------------------------- #
-# Rolling history of reads (per EPC), populated from the active source
-# --------------------------------------------------------------------------- #
-def pump(maxlen: int = 400) -> List[TagRead]:
-    """Drain the active source into the per-EPC rolling history.
-
-    Returns the newly-drained reads.  Safe to call on every rerun.
-    """
+def source_running() -> bool:
     ss = _ss()
-    src = ss.source
-    if src is None:
+    return ss.source is not None and ss.source.running
+
+
+# --------------------------------------------------------------------------- #
+# Rolling read history
+# --------------------------------------------------------------------------- #
+def pump(maxlen: int = 600) -> List[TagRead]:
+    ss = _ss()
+    if ss.source is None:
         return []
-    new = src.drain()
+    new = ss.source.drain()
     hist: Dict[str, List[TagRead]] = ss.history
     for r in new:
         buf = hist.setdefault(r.epc, [])
@@ -122,95 +113,29 @@ def pump(maxlen: int = 400) -> List[TagRead]:
     return new
 
 
-def clear_history() -> None:
-    _ss().history = {}
-
-
 def history() -> Dict[str, List[TagRead]]:
     return _ss().history
 
 
+def clear_history() -> None:
+    _ss().history = {}
+
+
+def recent_reads(window_s: float) -> List[TagRead]:
+    """Flatten the last ``window_s`` seconds of reads across all tags."""
+    flat = [r for buf in _ss().history.values() for r in buf]
+    if not flat:
+        return []
+    latest = max(r.timestamp for r in flat)
+    return [r for r in flat if r.timestamp >= latest - window_s]
+
+
 # --------------------------------------------------------------------------- #
-# Sidebar: choose & control the data source
+# Misc UI
 # --------------------------------------------------------------------------- #
-def source_sidebar(key_prefix: str = "") -> Tuple[TagSource, bool]:
-    """Render the standard source controls in the sidebar.
-
-    Returns ``(source, live_refresh)`` where ``live_refresh`` indicates the page
-    should auto-rerun to animate.
-    """
-    ss = _ss()
-    with st.sidebar:
-        st.markdown("### Data source")
-        dev: Optional[Device] = ss.selected_device
-        can_live = dev is not None and dev.kind.value == "reader"
-
-        options = ["Simulator"]
-        if can_live:
-            options.append(f"Live reader ({dev.label})")
-        mode = st.radio(
-            "Read from",
-            options,
-            key=f"{key_prefix}src_mode",
-            help="Pick a device on the 'Select Device' page to enable live reads.",
-        )
-
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("▶ Start", key=f"{key_prefix}start", use_container_width=True):
-                if mode.startswith("Live") and dev is not None:
-                    src = start_live_source(dev)
-                    if src.last_error:
-                        st.error(src.last_error)
-                        start_sim_source()
-                else:
-                    start_sim_source()
-        with col2:
-            if st.button("⏹ Stop", key=f"{key_prefix}stop", use_container_width=True):
-                stop_source()
-
-        running = ss.source is not None and ss.source.running
-        kind = ss.source_kind
-        if running:
-            badge = "🟢 LIVE reader" if kind == "live" else "🟡 Simulator"
-            st.success(f"Streaming — {badge}")
-        else:
-            st.info("Stopped. Press Start to stream.")
-
-        live_refresh = st.checkbox(
-            "Auto-refresh", value=running, key=f"{key_prefix}auto",
-            help="Continuously rerun the page to animate live data.",
-        )
-        st.caption("Tip: pick/scan devices on the **Select Device** page.")
-
-    # Guarantee a source exists so pages always have data to show.
-    if ss.source is None:
-        start_sim_source()
-    return ss.source, live_refresh and (ss.source is not None and ss.source.running)
-
-
 def live_rerun(interval_s: float = 0.8) -> None:
-    """Sleep briefly then rerun — the simple Streamlit live-animation loop."""
     time.sleep(interval_s)
     st.rerun()
-
-
-# --------------------------------------------------------------------------- #
-# Formatting
-# --------------------------------------------------------------------------- #
-def rssi_color(rssi: float) -> str:
-    """Green (strong) -> red (weak) colour for an RSSI value in dBm."""
-    # Map -80..-35 dBm to 0..1.
-    t = max(0.0, min(1.0, (rssi + 80) / 45.0))
-    r = int(255 * (1 - t))
-    g = int(200 * t)
-    return f"rgb({r},{g},80)"
-
-
-def rssi_bar(rssi: float) -> str:
-    t = max(0.0, min(1.0, (rssi + 80) / 45.0))
-    filled = int(round(t * 10))
-    return "▮" * filled + "▯" * (10 - filled)
 
 
 def page_header(icon: str, title: str, subtitle: str) -> None:

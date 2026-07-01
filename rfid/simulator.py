@@ -146,6 +146,14 @@ class Scene:
                 phase = (phase + self._rng.normal(0, 0.15 + 0.4 * frac)) % (2.0 * math.pi)
                 seen = int(np.clip(self._rng.poisson(max(p_read * 8, 0.5)), 1, 50))
 
+                # Doppler = 2*v_radial/lambda (round trip). v_radial is the tag's
+                # velocity projected onto the antenna->tag line; ~0 for a static
+                # tag, non-zero (signed) for one moving toward/away.  This is the
+                # signal that lets the detector tell motion from a static block.
+                ux, uy = (tag.x - cfg.x) / d, (tag.y - cfg.y) / d
+                v_radial = tag.vx * ux + tag.vy * uy
+                doppler = 2.0 * v_radial / lam + self._rng.normal(0, 2.0)
+
                 reads.append(
                     TagRead(
                         epc=tag.epc,
@@ -155,6 +163,7 @@ class Scene:
                         channel=int(self._rng.integers(0, 50)),
                         timestamp=now,
                         seen_count=seen,
+                        doppler=round(float(doppler), 1),
                         reader="SIMULATOR",
                     )
                 )
@@ -162,38 +171,20 @@ class Scene:
 
 
 # --------------------------------------------------------------------------- #
-# Ready-made demo scenes
+# Ready-made demo scene
 # --------------------------------------------------------------------------- #
-def demo_scene(seed: int = 7) -> Scene:
-    """A 2-antenna dock-door style scene with a couple of moving tags."""
-    antennas = {
-        1: AntennaConfig(antenna_id=1, x=0.0, y=1.0, heading_deg=0.0),
-        2: AntennaConfig(antenna_id=2, x=0.0, y=3.0, heading_deg=0.0),
-    }
-    tags = [
-        SimTag("E280-1170-0001", x=3.0, y=2.0, vx=0.25, vy=0.12, gain_offset_db=0.0),
-        SimTag("E280-1170-0002", x=4.2, y=1.2, vx=-0.18, vy=0.2, gain_offset_db=-2.0),
-        SimTag("E280-1170-0003", x=2.0, y=3.2, vx=0.1, vy=-0.15, gain_offset_db=1.5),
-    ]
-    return Scene(antennas=antennas, tags=tags, bounds=(0.0, 0.0, 6.0, 4.0), seed=seed)
+def room_scene(seed: int = 9) -> Scene:
+    """Four antennas on the corners of a room + one tag in the middle.
 
-
-def spread_scene(seed: int = 5) -> Scene:
-    """Three antennas around the room corners for true 2D trilateration."""
+    The default tag is static; the Obstruction tool lets you add velocity and
+    drop a blocker on any antenna's path.  Four antennas mean one path can be
+    blocked and the other three still fix the tag's position.
+    """
     antennas = {
         1: AntennaConfig(antenna_id=1, x=0.0, y=0.0, heading_deg=45.0),
         2: AntennaConfig(antenna_id=2, x=6.0, y=0.0, heading_deg=135.0),
-        3: AntennaConfig(antenna_id=3, x=3.0, y=4.5, heading_deg=270.0),
+        3: AntennaConfig(antenna_id=3, x=6.0, y=5.0, heading_deg=225.0),
+        4: AntennaConfig(antenna_id=4, x=0.0, y=5.0, heading_deg=315.0),
     }
-    tags = [
-        SimTag("E280-1170-0011", x=2.5, y=2.0, vx=0.22, vy=0.14),
-        SimTag("E280-1170-0012", x=4.0, y=1.5, vx=-0.15, vy=0.18, gain_offset_db=-1.5),
-    ]
-    return Scene(antennas=antennas, tags=tags, bounds=(0.0, 0.0, 6.0, 4.5), seed=seed)
-
-
-def single_antenna_scene(seed: int = 11) -> Scene:
-    """One antenna facing a lane, one tag walking away then back."""
-    antennas = {1: AntennaConfig(antenna_id=1, x=0.0, y=2.0, heading_deg=0.0)}
-    tags = [SimTag("E280-1170-0009", x=1.5, y=2.0, vx=0.3, vy=0.0)]
-    return Scene(antennas=antennas, tags=tags, bounds=(0.0, 0.0, 8.0, 4.0), seed=seed)
+    tags = [SimTag("E280-1170-0042", x=3.0, y=2.5, vx=0.0, vy=0.0)]
+    return Scene(antennas=antennas, tags=tags, bounds=(0.0, 0.0, 6.0, 5.0), seed=seed)
