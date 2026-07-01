@@ -61,10 +61,15 @@ def set_scene(scene: Scene) -> None:
 
 
 def antennas() -> Dict[int, AntennaConfig]:
-    """Antenna geometry currently in use (scene in sim mode, editor in live)."""
+    """Antenna geometry currently in use.
+
+    Sim mode uses the scene's antennas; live mode uses the auto-detected
+    antennas (only those the reader has actually reported), empty until reads
+    arrive.
+    """
     ss = _ss()
-    if ss.source_kind == "live" and ss.live_antennas:
-        return ss.live_antennas
+    if ss.source_kind == "live":
+        return ss.live_antennas or {}
     return get_scene().antennas
 
 
@@ -148,6 +153,24 @@ def recent_reads(window_s: float) -> List[TagRead]:
         return []
     latest = max(r.timestamp for r in flat)
     return [r for r in flat if r.timestamp >= latest - window_s]
+
+
+def distinct_antenna_ids(hist: Dict[str, List[TagRead]]) -> List[int]:
+    """Sorted set of antenna IDs present in a history dict (pure, testable)."""
+    ids = set()
+    for buf in hist.values():
+        for r in buf:
+            ids.add(r.antenna)
+    return sorted(ids)
+
+
+def detected_antenna_ids() -> List[int]:
+    """Antenna IDs actually seen in the read stream (auto-detected, not guessed).
+
+    Works for any transport: the reader tells us how many antennas are reporting
+    via the ``antenna`` field on each read, so we never ask the user for a count.
+    """
+    return distinct_antenna_ids(_ss().history)
 
 
 # --------------------------------------------------------------------------- #

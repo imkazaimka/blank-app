@@ -74,8 +74,8 @@ machine to manage.
    and point its **Tag-Data** interface at your MQTT broker, using a topic like
    `zebra/<reader-name>/data`.
 2. In the sidebar choose **MQTT (IoT Connector)**, enter the **broker host**
-   (port 1883, or 8883 with TLS), the **topic** (`zebra/+/data` matches any
-   reader), optional auth, and each antenna's floor position, then **Connect**.
+   (port 1883, or 8883 with TLS) and the **topic** (`zebra/+/data` matches any
+   reader), optional auth, then **Connect**.
 
 The parser is tolerant of IoT Connector message variants — managed
 `SimpleTagEvent` or raw, single or batched, wrapped in a `data` object or flat —
@@ -87,10 +87,18 @@ and normalises `idHex`/`peakRssi`/`antenna`/`phase`/`timestamp` into reads.
 pip install sllurp
 ```
 
-Choose **LLRP**, enter the reader IP (port 5084) and antenna positions. Note
-Zebra FX readers report RSSI (used here); the simulator additionally supplies
-Doppler/phase so the moving/static label is demonstrable without an Impinj /
-ATR7000 reader.
+Choose **LLRP** and enter the reader IP (port 5084). Note Zebra FX readers report
+RSSI (used here); the simulator additionally supplies Doppler/phase so the
+moving/static label is demonstrable without an Impinj / ATR7000 reader.
+
+### Antennas are auto-detected
+
+You don't tell the app how many antennas you have. It **reads the antenna count
+straight from the tag stream** (the `antenna` field on every read), so present a
+tag to the reader after connecting and it lists exactly the antennas that are
+reporting. The only thing it asks for is each detected antenna's **floor
+position** — which the reader genuinely can't know — used to place and localize
+the tag. (Motion-aware detection needs ≥ 3 antennas reporting.)
 
 ## Architecture
 

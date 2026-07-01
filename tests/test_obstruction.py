@@ -209,6 +209,25 @@ def test_llrp_tag_normalisation():
 # --------------------------------------------------------------------------- #
 # Streamlit app smoke test
 # --------------------------------------------------------------------------- #
+def test_antenna_count_is_auto_detected_from_reads():
+    """The antenna count comes from the stream, not a user-entered guess."""
+    from app_common import distinct_antenna_ids
+    ants = _room()
+    scene = Scene(ants, [SimTag("E", x=3, y=2.5)], [], bounds=(0, 0, 6, 5), seed=1)
+    hist = {}
+    for r in _capture(scene, 10):
+        hist.setdefault(r.epc, []).append(r)
+    assert distinct_antenna_ids(hist) == [1, 2, 3, 4]     # all four detected
+    # A reader with only two antennas wired -> only two detected, no guess of 4.
+    two = {1: AntennaConfig(1, x=0, y=0), 2: AntennaConfig(2, x=6, y=0)}
+    scene2 = Scene(two, [SimTag("E", x=3, y=1)], [], bounds=(0, 0, 6, 5), seed=1)
+    h2 = {}
+    for r in _capture(scene2, 10):
+        h2.setdefault(r.epc, []).append(r)
+    assert distinct_antenna_ids(h2) == [1, 2]
+    assert distinct_antenna_ids({}) == []
+
+
 def test_app_runs_headless():
     from streamlit.testing.v1 import AppTest
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
