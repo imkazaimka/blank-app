@@ -1,27 +1,21 @@
-"""Zebra RFID testing & calibration toolkit.
+"""Zebra RFID obstruction-detection toolkit.
 
-A small, dependency-light library that powers four tools:
+A dependency-light library behind a single tool: decide whether the line of
+sight between a reader antenna and a tag is CLEAR or OBSTRUCTED, and tell a
+blocked path apart from a tag that simply moved.
 
-1. :mod:`rfid.discovery`   - find readers/printers on the LAN and show how to connect.
-2. :mod:`rfid.ranging`     - turn RSSI into an approximate distance / 2D position.
-3. :mod:`rfid.denoise`     - smooth noisy RSSI/phase streams (Kalman + learned filter).
-4. :mod:`rfid.obstruction` - decide whether the reader<->tag path is blocked.
-
-Everything works against real hardware over LLRP (:mod:`rfid.llrp_client`) and,
-when no hardware is present, against a physically-motivated
-:mod:`rfid.simulator` so the tools stay fully demonstrable.
+* :mod:`rfid.obstruction` - motion-invariant blockage detection (position
+  residuals + Doppler), plus a fixed-zone baseline detector and an optional
+  learned classifier.
+* :mod:`rfid.ranging`     - RSSI<->distance and 2D localization used to
+  re-estimate the tag position each window.
+* :mod:`rfid.sources`     - one streaming interface over a live LLRP reader
+  (:class:`~rfid.sources.LLRPTagSource`) and the simulator.
+* :mod:`rfid.simulator`   - a physics-based tag-read simulator (RSSI, phase,
+  Doppler, obstructions) so the tool is demonstrable without hardware.
 """
 
-from .models import (
-    AntennaConfig,
-    Device,
-    DeviceKind,
-    TagRead,
-    PORT_LLRP,
-    PORT_RAW_PRINT,
-    PORT_PRINTER_DISCOVERY,
-    PORT_SNMP,
-)
+from .models import AntennaConfig, Device, DeviceKind, TagRead, PORT_LLRP
 
 __all__ = [
     "AntennaConfig",
@@ -29,9 +23,6 @@ __all__ = [
     "DeviceKind",
     "TagRead",
     "PORT_LLRP",
-    "PORT_RAW_PRINT",
-    "PORT_PRINTER_DISCOVERY",
-    "PORT_SNMP",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

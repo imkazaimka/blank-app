@@ -1,16 +1,14 @@
-# --- Core UI + math (always required) ---
+# --- Core (always required) ---
 streamlit>=1.31
 numpy>=1.24
 pandas>=2.0
 plotly>=5.18
 scipy>=1.10
 
-# --- Optional hardware integration ---
-# These let the tools talk to real Zebra devices.  The app runs fine without
-# them (it falls back to the built-in simulator) — they are imported lazily.
+# --- Optional: live Zebra reader over LLRP ---
+# The app runs fully in Simulator mode without this; install it to stream real
+# reads from an FX7500 / FX9600 / FXR90 reader.  Imported lazily.
 #
-#   sllurp>=1.2.1      # LLRP client for Zebra FX readers (tag reads, RSSI, phase)
-#   zeroconf>=0.131    # mDNS/Bonjour discovery of readers & printers
-#   pysnmp>=4.4        # SNMP status/model probing of printers
+#   sllurp>=1.2.1
 #
-# Install hardware extras with:  pip install sllurp zeroconf pysnmp
+# Install with:  pip install sllurp
