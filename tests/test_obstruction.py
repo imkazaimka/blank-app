@@ -15,7 +15,7 @@ import pytest
 from rfid.models import AntennaConfig, TagRead
 from rfid import obstruction, ranging
 from rfid.simulator import Obstruction, Scene, SimTag, room_scene
-from rfid.sources import LLRPTagSource, SimulatedTagSource
+from rfid.sources import LLRPTagSource, MQTTTagSource, SimulatedTagSource
 
 
 # --- a 4-antenna room so one path can be blocked and 3 still fix position --- #
@@ -168,6 +168,36 @@ def test_simulated_source_streams():
     assert reads and all(isinstance(r, TagRead) for r in reads)
 
 
+def test_mqtt_parses_wrapped_simpletagevent():
+    import json
+    payload = json.dumps({
+        "data": {"format": "epc", "idHex": "E28011700001", "peakRssi": -56,
+                 "antenna": 2, "channel": 4, "phase": 180},
+        "timestamp": 1600000000000, "type": "SimpleTagEvent"})
+    r = MQTTTagSource._parse_payload(payload, reader="myfxIN")[0]
+    assert r.epc == "E28011700001" and r.rssi == -56.0 and r.antenna == 2
+    assert math.isclose(r.phase, math.pi, rel_tol=1e-3)     # 180 deg -> pi rad
+    assert abs(r.timestamp - 1600000000.0) < 1              # epoch ms -> s
+
+
+def test_mqtt_parses_flat_and_batched():
+    import json
+    flat = json.dumps({"epc": "AABB", "rssi": -61, "antennaPort": 3,
+                       "seenCount": 7, "doppler": 12.0, "timestamp": 1600000000})
+    r = MQTTTagSource._parse_payload(flat)[0]
+    assert r.antenna == 3 and r.seen_count == 7 and r.doppler == 12.0
+    batch = json.dumps([{"idHex": "AAAA", "peakRssi": -50, "antenna": 1},
+                        {"idHex": "BBBB", "peakRssi": -70, "antenna": 4}])
+    assert len(MQTTTagSource._parse_payload(batch)) == 2
+
+
+def test_mqtt_ignores_non_tag_messages():
+    import json
+    mgmt = json.dumps({"type": "ManagementEvent", "data": {"status": "ok"}})
+    assert MQTTTagSource._parse_payload(mgmt) == []
+    assert MQTTTagSource._parse_payload(b"not json") == []
+
+
 def test_llrp_tag_normalisation():
     tag = {"EPC": bytes.fromhex("E28011700001"), "PeakRSSI": -57, "AntennaID": 2,
            "ImpinjRFPhaseAngle": 2048, "LastSeenTimestampUTC": 1_600_000_000_000_000}
@@ -191,6 +221,16 @@ def test_app_runs_headless():
     at = AppTest.from_file(os.path.join(root, "app.py"), default_timeout=30)
     at.session_state["scene"] = scene
     at.session_state["history"] = hist
+    at.run()
+    assert not at.exception
+
+
+def test_app_live_mqtt_mode_renders():
+    """The Live-reader / MQTT sidebar branch must render without error."""
+    from streamlit.testing.v1 import AppTest
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    at = AppTest.from_file(os.path.join(root, "app.py"), default_timeout=30)
+    at.session_state["mode"] = "Live reader (LLRP)"
     at.run()
     assert not at.exception
 

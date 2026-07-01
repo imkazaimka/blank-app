@@ -24,9 +24,9 @@ import streamlit as st
 st.set_page_config(page_title="RFID Obstruction Detector", page_icon="🚧", layout="wide")
 
 from app_common import (
-    BRAND, _ss, antennas, get_scene, live_rerun, page_header, pump,
-    recent_reads, set_scene, sllurp_available, source_running, start_live, start_sim,
-    stop_source,
+    BRAND, _ss, antennas, get_scene, live_rerun, page_header, paho_available, pump,
+    recent_reads, set_scene, sllurp_available, source_running, start_live, start_mqtt,
+    start_sim, stop_source,
 )
 from rfid.models import AntennaConfig
 from rfid.obstruction import DOPPLER_MOVING_HZ, RESID_DROP_DB, analyze
@@ -89,24 +89,45 @@ with st.sidebar:
             st.rerun()
 
     else:  # Live reader
-        st.caption("Enter your reader's IP and each antenna's position on the floor.")
-        ip = st.text_input("Reader IP", value="192.168.1.50")
-        port = st.number_input("LLRP port", value=5084, step=1)
+        transport = st.radio("Transport", ["MQTT (IoT Connector)", "LLRP"],
+                             help="MQTT is Zebra's recommended path: the reader's IoT "
+                                  "Connector publishes tag JSON to a broker and we subscribe.")
+        if transport.startswith("MQTT"):
+            broker = st.text_input("MQTT broker host", value="192.168.1.100")
+            mqtt_port = st.number_input("Broker port", value=1883, step=1,
+                                        help="1883 plain · 8883 TLS")
+            topic = st.text_input("Tag-data topic", value="zebra/+/data",
+                                  help="IoT Connector publishes to zebra/<reader>/data. "
+                                       "'+' is an MQTT wildcard for any reader name.")
+            with st.expander("Auth / TLS"):
+                user = st.text_input("Username", value="")
+                pw = st.text_input("Password", value="", type="password")
+                tls = st.checkbox("Use TLS (8883)", value=False)
+            if not paho_available():
+                st.warning("`paho-mqtt` not installed — run `pip install paho-mqtt` for MQTT.")
+        else:
+            ip = st.text_input("Reader IP", value="192.168.1.50")
+            llrp_port = st.number_input("LLRP port", value=5084, step=1)
+            if not sllurp_available():
+                st.warning("`sllurp` not installed — run `pip install sllurp` for LLRP.")
+
         n_ant = st.number_input("Number of antennas", 3, 8, 4, 1,
                                 help="Motion-aware detection needs ≥3 antennas with known positions.")
         st.caption("Antenna positions (metres):")
         live_ants = {}
         for i in range(1, int(n_ant) + 1):
-            cc = st.columns(3)
+            cc = st.columns(2)
             x = cc[0].number_input(f"A{i} x", value=float(0 if i in (1, 4) else 6), key=f"ax{i}")
             y = cc[1].number_input(f"A{i} y", value=float(0 if i in (1, 2) else 5), key=f"ay{i}")
             live_ants[i] = AntennaConfig(antenna_id=i, x=x, y=y)
         _ss().live_antennas = live_ants
-        if not sllurp_available():
-            st.warning("`sllurp` not installed — run `pip install sllurp` for live LLRP reads.")
+
         c1, c2 = st.columns(2)
         if c1.button("▶ Connect", use_container_width=True):
-            src = start_live(ip, int(port))
+            if transport.startswith("MQTT"):
+                src = start_mqtt(broker, int(mqtt_port), topic, user, pw, tls)
+            else:
+                src = start_live(ip, int(llrp_port))
             if src.last_error:
                 st.error(src.last_error)
         if c2.button("⏹ Stop", use_container_width=True):
