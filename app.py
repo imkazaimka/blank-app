@@ -1,126 +1,126 @@
+"""Zebra RFID Testing & Calibration Toolkit - home page.
+
+A Streamlit multipage app with four tools for bringing up and calibrating Zebra
+UHF RFID installations:
+
+  1. Select Device     - scan the LAN for readers/printers and show how to connect.
+  2. Antenna & Location - live 2D field with signal strength + approximate tag position.
+  3. Signal Denoising  - smooth noisy RSSI/phase (Kalman + learned ML denoiser).
+  4. Obstruction Check - detect when something blocks the reader<->tag line of sight.
+
+Everything runs against real hardware over LLRP when a reader is reachable, and
+falls back to a physics-based simulator so the tools are always demonstrable.
+"""
+
+from __future__ import annotations
+
 import streamlit as st
-import numpy as np
-import pandas as pd
-import random
-import plotly.express as px
 
-st.set_page_config(layout="wide")
+st.set_page_config(
+    page_title="Zebra RFID Toolkit",
+    page_icon="📡",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-st.title("🤖 100 Buyer Bots Simulation (UK)")
+from app_common import BRAND, optional_capabilities, _ss
 
-# -----------------------------
-# PRODUCT INPUT
-# -----------------------------
-price = st.slider("Price (£)", 10, 300, 80)
-rgb = st.checkbox("RGB Lighting")
-mechanical = st.checkbox("Mechanical")
+_ss()
 
-product = {
-    "price": price,
-    "features": []
-}
+st.markdown(
+    f"<h1 style='margin-bottom:0'>📡 Zebra RFID <span style='color:{BRAND}'>Testing & Calibration</span> Toolkit</h1>",
+    unsafe_allow_html=True,
+)
+st.caption(
+    "Bring up, test and calibrate Zebra UHF RFID readers (FX7500 / FX9600 / FXR90 / ATR7000) "
+    "and RFID printers (ZT411 / ZT421 / ZD621R). Works over LLRP against real hardware, with a "
+    "physics-based simulator fallback when no reader is on the network."
+)
 
-if rgb:
-    product["features"].append("RGB")
-if mechanical:
-    product["features"].append("mechanical")
+st.divider()
 
-# -----------------------------
-# REGIONS
-# -----------------------------
-regions = {
-    "London": {"income": 3500, "tech": 0.9},
-    "South East": {"income": 3200, "tech": 0.85},
-    "North West": {"income": 2500, "tech": 0.75},
-    "Scotland": {"income": 2700, "tech": 0.7},
-    "Wales": {"income": 2300, "tech": 0.6},
-}
+# --------------------------------------------------------------------------- #
+# The four tools
+# --------------------------------------------------------------------------- #
+tools = [
+    (
+        "1 · Select Device",
+        "🔎",
+        "Scan the local network for every Zebra reader and printer, identify the model, "
+        "check RFID capability, and get a ready-to-paste connection command.",
+        "pages/1_Select_Device.py",
+    ),
+    (
+        "2 · Antenna & Location",
+        "🎯",
+        "Turn live RSSI into distance and plot each tag on a 2D field around your antennas, "
+        "with a signal-strength heatmap and an uncertainty ring.",
+        "pages/2_Antenna_and_Location.py",
+    ),
+    (
+        "3 · Signal Denoising",
+        "🧠",
+        "Clean up jumpy readings with a Kalman filter or a learned (ML) denoiser, and see the "
+        "noise-reduction gain in real time — the smoothing people use online.",
+        "pages/3_Signal_Denoising.py",
+    ),
+    (
+        "4 · Obstruction Check",
+        "🚧",
+        "Detect when a person, metal or liquid is blocking the reader-to-tag path by watching "
+        "RSSI drop vs. a calibrated baseline, rising variance and falling read rate.",
+        "pages/4_Obstruction_Check.py",
+    ),
+]
 
-region_names = list(regions.keys())
+cols = st.columns(2)
+for i, (name, icon, desc, path) in enumerate(tools):
+    with cols[i % 2]:
+        with st.container(border=True):
+            st.markdown(f"### {icon} {name}")
+            st.write(desc)
+            try:
+                st.page_link(path, label=f"Open {name.split('·')[1].strip()} →")
+            except Exception:
+                st.caption(f"Open **{name}** from the sidebar.")
 
-# -----------------------------
-# BOT GENERATION
-# -----------------------------
-def create_bot(bot_id):
-    region = random.choice(region_names)
-    r = regions[region]
+st.divider()
 
-    return {
-        "id": bot_id,
-        "region": region,
-        "budget": np.random.normal(r["income"], 400),
-        "likes_rgb": random.random(),
-        "needs_keyboard": random.random(),
-        "tech_interest": r["tech"]
-    }
+# --------------------------------------------------------------------------- #
+# Environment / capabilities + how it connects
+# --------------------------------------------------------------------------- #
+left, right = st.columns([1, 1])
 
-# -----------------------------
-# DECISION FUNCTION
-# -----------------------------
-def will_buy(bot, product):
-    score = 0
+with left:
+    st.subheader("Environment")
+    caps = optional_capabilities()
+    for label, ok in caps.items():
+        st.write(("✅ " if ok else "⚪ ") + label + ("" if ok else "  _(optional — pip install)_"))
+    if not any(caps.values()):
+        st.info(
+            "No hardware libraries detected — that's fine. Every tool runs in **Simulator** "
+            "mode. Install extras with `pip install sllurp zeroconf WSDiscovery pysnmp` to talk "
+            "to real devices."
+        )
 
-    if product["price"] < bot["budget"] * 0.05:
-        score += 0.5
-    else:
-        score -= 0.3
+with right:
+    st.subheader("How devices connect")
+    st.markdown(
+        """
+| Device | Discovery | Control |
+|---|---|---|
+| **FX / FXR readers** | WS-Discovery (UDP mcast 3702), TCP sweep 5084 | LLRP · TCP **5084** (TLS 5085) |
+| **ATR7000** (RTLS) | WS-Discovery | LLRP + azimuth/elevation direction |
+| **RFID printers** | UDP broadcast **4201**, mDNS, SNMP | Raw ZPL · TCP **9100** |
+| **Handhelds** (RFD40/90) | not networked | Bluetooth SPP / USB |
 
-    if "RGB" in product["features"]:
-        score += bot["likes_rgb"] * 0.3
-
-    score += bot["needs_keyboard"] * 0.5
-    score += bot["tech_interest"] * 0.2
-
-    return score > 0.5
-
-# -----------------------------
-# RUN SIMULATION
-# -----------------------------
-if st.button("Run Simulation"):
-
-    bots = []
-    buyers = 0
-
-    for i in range(100):
-        bot = create_bot(i)
-        bot["buy"] = will_buy(bot, product)
-
-        if bot["buy"]:
-            buyers += 1
-
-        bots.append(bot)
-
-    df = pd.DataFrame(bots)
-
-    st.subheader("📊 Summary")
-    st.metric("Total Buyers", buyers)
-    st.metric("Conversion Rate", f"{buyers}%")
-
-    region_stats = df.groupby("region")["buy"].mean().reset_index()
-    region_stats["buy"] *= 100
-
-    st.subheader("🌍 Buyers by Region")
-    fig_bar = px.bar(region_stats, x="region", y="buy", title="Conversion % per Region")
-    st.plotly_chart(fig_bar, use_container_width=True)
-
-    buy_counts = df["buy"].value_counts().reset_index()
-    buy_counts.columns = ["Buy", "Count"]
-
-    fig_pie = px.pie(buy_counts, names="Buy", values="Count", title="Buy vs Not Buy")
-    st.plotly_chart(fig_pie, use_container_width=True)
-
-    st.subheader("💰 Budget vs Decision")
-
-    fig_scatter = px.scatter(
-        df,
-        x="budget",
-        y="needs_keyboard",
-        color="buy",
-        hover_data=["region"],
-        title="Bot Behavior"
+Readers report per-tag **EPC, PeakRSSI (dBm), antenna, timestamp**; Impinj-class
+readers and the ATR7000 add **RF phase / direction** used for fine ranging.
+        """
     )
 
-    st.plotly_chart(fig_scatter, use_container_width=True)
-
-    st.subheader("📄 Bot Data")
-    st.dataframe(df)
+st.divider()
+st.caption(
+    "Start at **Select Device** to find hardware, or jump straight into any tool — each one "
+    "auto-starts the simulator so you always have live data to work with."
+)
